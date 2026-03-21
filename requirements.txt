@@ -1,0 +1,26 @@
+# ============================================================
+# requirements.txt — Voice AI Sidecar v2
+# Python 3.10+  |  Intel CPU  |  16 GB RAM
+# Vietnamese STT (faster-whisper) + TTS (piper-tts)
+# ============================================================
+
+# ── Web framework ──────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# ── Settings & validation ──────────────────────────────────
+pydantic>=2.5.0
+pydantic-settings>=2.2.0
+
+# ── Structured logging ─────────────────────────────────────
+structlog>=24.0.0
+
+# ── AI APIs ────────────────────────────────────
+openai>=1.0.0
+
+# ── Audio ─────────────────────────────────────────────────
+numpy>=1.24.0
+
+# ── HTTP client — calls .NET 10 backend ───────────────────
+httpx>=0.25.0

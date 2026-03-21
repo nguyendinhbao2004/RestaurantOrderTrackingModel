@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  voice-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: voice_ai_sidecar
+    image: voice-ai-sidecar:latest
+    restart: unless-stopped
+
+    # ---- Environment ----
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8001
+
+    # ---- Ports ----
+    ports:
+      - "8001:8001"
+
+    # ---- Resource Limits (Intel Gen11 / 16GB RAM) ----
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0" # Reserve 4 logical cores for AI inference
+          memory: 6G # Whisper base ~1.5GB + Kokoro ~200MB + headroom
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+
+    # ---- Volumes ----
+    volumes:
+      - ./models:/app/models:ro # AI model files (read-only)
+      - voice_ai_logs:/app/logs # Persistent structured logs
+
+    # ---- Health Check ----
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/v1/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s # Allow extra time for model loading at startup
+
+    # ---- Networking ----
+    networks:
+      - ai_net
+
+# ---- Named Volumes ----
+volumes:
+  voice_ai_logs:
+
+    # ---- Networks ----
+networks:
+  ai_net:
+    driver: bridge
+    # The .NET 10 main backend should join this network as well:
+    # external: true  # Uncomment if the network is managed externally
