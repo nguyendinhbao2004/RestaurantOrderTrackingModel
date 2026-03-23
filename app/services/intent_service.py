@@ -116,11 +116,14 @@ INTENT_CATALOG: dict[str, dict] = {
         "patterns": [
             "tạo đơn hàng", "thêm đơn hàng", "tạo order", "đặt hàng",
             "gọi món", "order món", "đặt món", "gọi thêm món",
+            # Common STT recognition errors for "đơn hàng" / "tạo"
+            "tạo đương hẹn", "tạo đơn hẹn", "tạo don hang", "tao don hang",
+            "đương hẹn", "đơn hẹn", "don hang",
         ],
         "params": {
-            "customer":   r"(?:khách|customer|tên khách)\s+(?:là\s+)?([A-Za-z0-9\s]+?)(?:\s+(?:sản phẩm|đặt|order|$))",
-            "product":    r"(?:sản phẩm|product|hàng|món)\s+(?:là\s+)?([A-Za-z0-9À-ỹ\s]+?)(?:\s+(?:số lượng|giá|order|đơn|$))",
-            "quantity":   r"(?:số lượng|sl|quantity)\s+(?:là\s+)?(\d+)",
+            "customer":   r"(?:tên khắc|khắc|tên|customer|khách)\s+(?:là\s+)?([A-Za-z0-9À-ỹ\s]+?)[\s,;.]*(?:sản phẩm|sẵn phẩm|product|hàng|$)",
+            "product":    r"(?:sản phẩm|sẵn phẩm|product|hàng|món)\s+(?:là\s+)?([A-Za-z0-9À-ỹ\s\d]+?)[\s,;.]*(?:số lượng|giá|cân|order|đơn|$)",
+            "quantity":   r"(?:số lượng|cân|sl|quantity)\s+(?:là\s+)?(\d+)",
             "order_id":   r"(?:đơn|order)\s*(?:id|mã)?\s*(?:là\s+)?(\d+)",
         },
     },

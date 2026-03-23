@@ -62,6 +62,10 @@ class Settings(BaseSettings):
         default="changeme-dotnet",
         description="API key sent in X-API-Key header to the .NET 10 backend.",
     )
+    dotnet_voice_callback_path: str = Field(
+        default="/api/voicecommands/callback",
+        description="Relative callback path on .NET backend to receive STT results.",
+    )
 
     # ------------------------------------------------------------------ #
     # Helpers

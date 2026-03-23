@@ -20,7 +20,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.schemas.voice_schema import ActionResult
+from app.schemas.voice_schema import ActionResult, VoiceCallbackPayload
 
 logger = get_logger(__name__)
 
@@ -55,6 +55,8 @@ _MSG = {
     "create_order_not_found": "Không tìm thấy món trong danh sách sản phẩm: {detail}",
     "list_orders_ok":     "Lấy danh sách đơn hàng thành công.",
     "list_orders_fail":   "Không lấy được danh sách đơn hàng: {detail}",
+    "voice_callback_ok":  "Gửi callback STT thành công.",
+    "voice_callback_fail":"Gửi callback STT thất bại: {detail}",
     "unknown_intent":     "Không nhận ra lệnh. Vui lòng thử lại.",
     "api_error":          "Lỗi kết nối đến hệ thống: {detail}",
 }
@@ -72,11 +74,25 @@ class ActionService:
 
     def __init__(self, settings: Settings) -> None:
         self._base_url = settings.dotnet_api_base_url.rstrip("/")
+        self._voice_callback_path = settings.dotnet_voice_callback_path
         self._headers = {
             "X-API-Key": settings.dotnet_api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+    async def send_voice_callback(self, payload: VoiceCallbackPayload) -> ActionResult:
+        """Push STT callback payload to .NET backend."""
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            headers=self._headers,
+            timeout=self.TIMEOUT,
+        ) as client:
+            resp = await client.post(
+                self._voice_callback_path,
+                json=payload.model_dump(by_alias=True),
+            )
+        return self._build_result(resp, "voice_callback", "ok", "fail")
 
     async def execute(self, intent: str, params: dict[str, Any]) -> ActionResult:
         """

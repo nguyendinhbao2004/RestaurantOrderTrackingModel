@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 
-from app.schemas.voice_schema import TextCommandRequest, VoiceCommandResponse
+from app.schemas.voice_schema import TextCommandRequest, VoiceCallbackPayload, VoiceCommandResponse
 from app.services.action_service import ActionService
 from app.services.intent_service import intent_service
 from app.services.piper_service import PiperService
@@ -63,12 +63,15 @@ def _action(settings: Settings = Depends(get_settings)) -> ActionService:
         "(1) Transcribe with Whisper, "
         "(2) Parse intent from the transcript, "
         "(3) Execute the matching .NET 10 API call, "
-        "(4) Return a structured JSON result."
+        "(4) Callback the transcript to .NET backend if accountId is provided, "
+        "(5) Return a structured JSON result."
     ),
 )
 async def voice_command(
     file: UploadFile = File(..., description="Audio file (WAV/MP3/OGG). Admin speaks Vietnamese."),
     language: str = Form(default="vi", description="STT language hint. Default: 'vi' (Vietnamese)."),
+    account_id: str | None = Form(default=None, description="Account ID for .NET backend voice callback."),
+    audio_url: str | None = Form(default=None, description="Optional audio URL. If not provided, auto-generated from file."),
     stt: WhisperService = Depends(_whisper),
     action: ActionService = Depends(_action),
 ) -> VoiceCommandResponse:
@@ -87,6 +90,26 @@ async def voice_command(
     stt_result = await stt.transcribe(audio_data=audio_bytes, language=language)
     transcript = stt_result.text
     logger.info("STT complete.", transcript=transcript[:80])
+
+    # ── Optional callback payload to .NET backend ─────────────────────
+    if account_id:
+        # Auto-generate audioUrl from filename if not provided
+        final_audio_url = audio_url or f"voice/{account_id}/{file.filename}"
+        callback_payload = VoiceCallbackPayload(
+            accountId=account_id,
+            audioUrl=final_audio_url,
+            transcribedText=transcript,
+            confidenceScore=1.0,
+            errorMessage=None,
+        )
+        callback_result = await action.send_voice_callback(callback_payload)
+        logger.info(
+            "Voice callback sent to .NET.",
+            account_id=account_id,
+            audio_url=final_audio_url,
+            success=callback_result.success,
+            http_status=callback_result.http_status,
+        )
 
     # ── Step 2: NLU ────────────────────────────────────────────────────
     parsed = intent_service.parse(transcript)
@@ -130,6 +153,24 @@ async def voice_text_command(
     transcript = body.text.strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="Text transcript cannot be empty.")
+
+    if body.account_id:
+        final_audio_url = body.audio_url or f"voice/{body.account_id}/text-command"
+        callback_payload = VoiceCallbackPayload(
+            accountId=body.account_id,
+            audioUrl=final_audio_url,
+            transcribedText=transcript,
+            confidenceScore=body.confidence_score if body.confidence_score is not None else 1.0,
+            errorMessage=None,
+        )
+        callback_result = await action.send_voice_callback(callback_payload)
+        logger.info(
+            "Voice callback sent from text command.",
+            account_id=body.account_id,
+            audio_url=final_audio_url,
+            success=callback_result.success,
+            http_status=callback_result.http_status,
+        )
 
     parsed = intent_service.parse(transcript)
     action_result = await action.execute(intent=parsed.intent, params=parsed.params)
