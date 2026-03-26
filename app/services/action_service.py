@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import unicodedata
 from typing import Any
+from difflib import SequenceMatcher
 
 import httpx
 
@@ -23,6 +24,36 @@ from app.core.logging import get_logger
 from app.schemas.voice_schema import ActionResult, VoiceCallbackPayload
 
 logger = get_logger(__name__)
+
+_VN_NUMBER_MAP = {
+    "mot": 1,
+    "một": 1,
+    "hai": 2,
+    "ba": 3,
+    "bon": 4,
+    "bốn": 4,
+    "tu": 4,
+    "tư": 4,
+    "nam": 5,
+    "năm": 5,
+    "sau": 6,
+    "sáu": 6,
+    "bay": 7,
+    "bảy": 7,
+    "tam": 8,
+    "tám": 8,
+    "chin": 9,
+    "chín": 9,
+    "muoi": 10,
+    "mười": 10,
+}
+
+_PRODUCT_TYPO_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    (" trả ", " chả "),
+    (" tra ", " cha "),
+    (" xáo ", " xào "),
+    (" sao ", " xào "),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -183,51 +214,71 @@ class ActionService:
         return await self._get("/api/products", "list_products")
 
     async def _handle_create_order(self, params: dict) -> ActionResult:
-        product_name = self._extract_product_name(params)
-        if not product_name:
+        requested_items = self._extract_requested_items(params)
+        if not requested_items:
             return ActionResult(
                 success=False,
                 http_status=400,
                 message=_MSG["create_order_miss"],
             )
 
-        product = await self._find_product_by_name(product_name)
-        if not product:
+        payload_items: list[dict[str, Any]] = []
+        missing_products: list[str] = []
+        for requested in requested_items:
+            product_name = requested["product"]
+            product = await self._find_product_by_name(product_name)
+            if not product:
+                missing_products.append(product_name)
+                continue
+
+            product_id = self._extract_id(product)
+            if product_id is None:
+                return ActionResult(
+                    success=False,
+                    http_status=500,
+                    message=_MSG["create_order_fail"].format(detail="Không đọc được product_id từ API product."),
+                )
+
+            quantity = self._to_int(requested.get("quantity"), default=1)
+            payload_items.append(
+                {
+                    "productId": product_id,
+                    "note": self._to_str(requested.get("note")) or "",
+                    "quantity": quantity,
+                }
+            )
+
+        if missing_products:
             return ActionResult(
                 success=False,
                 http_status=404,
-                message=_MSG["create_order_not_found"].format(detail=product_name),
+                message=_MSG["create_order_not_found"].format(detail=", ".join(missing_products)),
             )
 
-        product_id = self._extract_id(product)
-        if product_id is None:
+        if not payload_items:
             return ActionResult(
                 success=False,
-                http_status=500,
-                message=_MSG["create_order_fail"].format(detail="Không đọc được product_id từ API product."),
+                http_status=400,
+                message=_MSG["create_order_miss"],
             )
 
-        quantity = self._to_int(params.get("quantity"), default=1)
         payload: dict[str, Any] = {
-            "productId": product_id,
-            "quantity": quantity,
+            "orderChannel": self._to_str(params.get("order_channel")) or "voice",
+            "items": payload_items,
         }
 
-        order_id = self._to_int(params.get("order_id"))
-        if order_id is not None:
+        order_id = self._to_str(params.get("order_id"))
+        if order_id:
             payload["orderId"] = order_id
 
-        if "customer" in params:
-            payload["customer"] = params["customer"]
-
-        # Try common order-item endpoints, fallback to legacy order creation.
-        for path in ("/api/orderitems", "/api/order-items", "/api/orderitem"):
+        # Preferred .NET endpoint provided by backend, keep lowercase fallbacks.
+        for path in ("/api/OrderItem", "/api/orderitem", "/api/order-items", "/api/orderitems"):
             result = await self._post(path, payload, "create_order")
             if result.success or result.http_status != 404:
                 return result
 
         fallback_payload: dict[str, Any] = {k: v for k, v in params.items()}
-        fallback_payload["product_id"] = product_id
+        fallback_payload["items"] = payload_items
         return await self._post("/api/orders", fallback_payload, "create_order")
 
     async def _handle_list_orders(self, params: dict) -> ActionResult:
@@ -244,13 +295,13 @@ class ActionService:
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, intent: str) -> ActionResult:
+    async def _get(self, path: str, intent: str, params: dict[str, Any] | None = None) -> ActionResult:
         async with httpx.AsyncClient(
             base_url=self._base_url,
             headers=self._headers,
             timeout=self.TIMEOUT,
         ) as client:
-            resp = await client.get(path)
+            resp = await client.get(path, params=params)
         return self._build_result(resp, intent, "ok", "fail")
 
     async def _post(self, path: str, payload: dict, intent: str) -> ActionResult:
@@ -309,9 +360,34 @@ class ActionService:
         if not candidate:
             return None
 
-        by_name = await self._get(f"/api/products/by-name/{candidate}", "get_product")
+        by_name = await self._get("/api/Product/by-name", "get_product", params={"name": candidate})
         if by_name.success and isinstance(by_name.data, dict):
             return by_name.data
+
+        for variant in self._product_name_variants(candidate):
+            by_name_variant = await self._get("/api/Product/by-name", "get_product", params={"name": variant})
+            if by_name_variant.success and isinstance(by_name_variant.data, dict):
+                logger.info("Resolved product by typo variant.", original=candidate, variant=variant)
+                return by_name_variant.data
+
+        by_name_legacy = await self._get(f"/api/products/by-name/{candidate}", "get_product")
+        if by_name_legacy.success and isinstance(by_name_legacy.data, dict):
+            return by_name_legacy.data
+
+        products_pascal = await self._get("/api/Product", "list_products")
+        if products_pascal.success and products_pascal.data is not None:
+            rows = self._extract_collection(products_pascal.data)
+            target = self._normalize_text(candidate)
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_name = str(row.get("name") or row.get("productName") or "").strip()
+                if row_name and self._normalize_text(row_name) == target:
+                    return row
+
+            fuzzy_match = self._best_fuzzy_product(rows, candidate)
+            if fuzzy_match is not None:
+                return fuzzy_match
 
         products = await self._get("/api/products", "list_products")
         if not products.success or products.data is None:
@@ -328,7 +404,49 @@ class ActionService:
             row_name = str(row.get("name") or row.get("productName") or "").strip()
             if row_name and self._normalize_text(row_name) == target:
                 return row
+
+        fuzzy_match = self._best_fuzzy_product(rows, candidate)
+        if fuzzy_match is not None:
+            return fuzzy_match
         return None
+
+    def _best_fuzzy_product(self, rows: list[Any], candidate: str) -> dict[str, Any] | None:
+        target = self._normalize_text(candidate)
+        best_row: dict[str, Any] | None = None
+        best_score = 0.0
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_name = str(row.get("name") or row.get("productName") or "").strip()
+            if not row_name:
+                continue
+
+            normalized_row_name = self._normalize_text(row_name)
+            score = SequenceMatcher(None, target, normalized_row_name).ratio()
+            if score > best_score:
+                best_score = score
+                best_row = row
+
+        # Accept small spelling mistakes, but avoid loose matches.
+        if best_row is not None and best_score >= 0.78:
+            logger.info("Fuzzy product match selected.", candidate=candidate, score=round(best_score, 3))
+            return best_row
+        return None
+
+    @staticmethod
+    def _product_name_variants(name: str) -> list[str]:
+        padded = f" {name.strip().lower()} "
+        variants: set[str] = set()
+
+        for src, dst in _PRODUCT_TYPO_REPLACEMENTS:
+            if src in padded:
+                variants.add(" ".join(padded.replace(src, dst).split()))
+
+        # Also try title casing because many BE filters are case-sensitive.
+        title_variants = {v.title() for v in variants}
+        variants.update(title_variants)
+        return [v for v in variants if v]
 
     @staticmethod
     def _extract_collection(data: Any) -> list[Any]:
@@ -356,21 +474,67 @@ class ActionService:
         return None
 
     @staticmethod
+    def _extract_requested_items(params: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_items = params.get("items")
+        extracted: list[dict[str, Any]] = []
+        if isinstance(raw_items, list):
+            for row in raw_items:
+                if not isinstance(row, dict):
+                    continue
+                product_name = None
+                for key in ("product", "name", "item", "dish"):
+                    value = row.get(key)
+                    if isinstance(value, str) and value.strip():
+                        product_name = value.strip()
+                        break
+                if not product_name:
+                    continue
+                extracted.append(
+                    {
+                        "product": product_name,
+                        "quantity": row.get("quantity", 1),
+                        "note": row.get("note"),
+                    }
+                )
+            if extracted:
+                return extracted
+
+        product_name = ActionService._extract_product_name(params)
+        if not product_name:
+            return []
+        return [
+            {
+                "product": product_name,
+                "quantity": params.get("quantity", 1),
+                "note": params.get("note"),
+            }
+        ]
+
+    @staticmethod
     def _to_int(value: Any, default: int | None = None) -> int | None:
         if value is None:
             return default
         try:
             return int(str(value).strip())
         except (TypeError, ValueError):
-            return default
+            text = str(value).strip().lower()
+            normalized = unicodedata.normalize("NFKD", text)
+            no_accent = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+            return _VN_NUMBER_MAP.get(no_accent, default)
 
     @staticmethod
-    def _extract_id(product: dict[str, Any]) -> int | None:
+    def _to_str(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _extract_id(product: dict[str, Any]) -> str | None:
         for key in ("id", "productId", "product_id"):
             value = product.get(key)
-            try:
-                if value is not None:
-                    return int(value)
-            except (TypeError, ValueError):
-                continue
+            if value is not None:
+                text = str(value).strip()
+                if text:
+                    return text
         return None

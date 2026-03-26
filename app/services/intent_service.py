@@ -22,6 +22,22 @@ from app.schemas.voice_schema import ParsedIntent
 
 logger = get_logger(__name__)
 
+_ORDER_VERBS = (
+    "cho toi",
+    "cho tui",
+    "cho tuy",
+    "cho minh",
+    "cho anh",
+    "cho chi",
+    "cho em",
+    "lay",
+    "them",
+    "goi",
+    "order",
+)
+
+_QTY_TOKEN = r"\d+|một|mot|hai|ba|bốn|bon|tư|tu|năm|nam|sáu|sau|bảy|bay|tám|tam|chín|chin|mười|muoi"
+
 # ---------------------------------------------------------------------------
 # Intent catalog — edit freely to match your .NET 10 API routes
 # ---------------------------------------------------------------------------
@@ -119,11 +135,14 @@ INTENT_CATALOG: dict[str, dict] = {
             # Common STT recognition errors for "đơn hàng" / "tạo"
             "tạo đương hẹn", "tạo đơn hẹn", "tạo don hang", "tao don hang",
             "đương hẹn", "đơn hẹn", "don hang",
+            # Natural ordering speech in restaurants
+            "cho tôi", "cho tui", "cho tuy", "cho mình", "cho em", "cho anh", "cho chị",
+            "lấy", "thêm", "cho",
         ],
         "params": {
             "customer":   r"(?:tên khắc|khắc|tên|customer|khách)\s+(?:là\s+)?([A-Za-z0-9À-ỹ\s]+?)[\s,;.]*(?:sản phẩm|sẵn phẩm|product|hàng|$)",
             "product":    r"(?:sản phẩm|sẵn phẩm|product|hàng|món)\s+(?:là\s+)?([A-Za-z0-9À-ỹ\s\d]+?)[\s,;.]*(?:số lượng|giá|cân|order|đơn|$)",
-            "quantity":   r"(?:số lượng|cân|sl|quantity)\s+(?:là\s+)?(\d+)",
+            "quantity":   r"(?:số lượng|cân|sl|quantity)\s+(?:là\s+)?(\d+|một|mot|hai|ba|bốn|bon|tư|tu|bốn|bon|năm|nam|sáu|sau|bảy|bay|tám|tam|chín|chin|mười|muoi)",
             "order_id":   r"(?:đơn|order)\s*(?:id|mã)?\s*(?:là\s+)?(\d+)",
         },
     },
@@ -172,12 +191,43 @@ class IntentService:
             # Extract parameters
             params = self._extract_params(transcript, definition["params"])
 
+            if intent_name == "create_order":
+                items = self._extract_order_items(transcript)
+                if items:
+                    params["items"] = items
+                    if "product" not in params:
+                        params["product"] = items[0]["product"]
+                    if "quantity" not in params:
+                        params["quantity"] = items[0]["quantity"]
+
             logger.info(
                 "Intent matched.",
                 intent=intent_name,
                 params=list(params.keys()),
             )
             return ParsedIntent(intent=intent_name, params=params, confidence=1.0)
+
+        # Heuristic fallback for natural order sentences where trigger phrase is noisy.
+        if self._looks_like_order_request(text_lower):
+            params = self._extract_params(transcript, INTENT_CATALOG["create_order"]["params"])
+            items = self._extract_order_items(transcript)
+            if items:
+                params["items"] = items
+                if "product" not in params:
+                    params["product"] = items[0]["product"]
+                if "quantity" not in params:
+                    params["quantity"] = items[0]["quantity"]
+            if "product" not in params:
+                inferred_product = self._infer_product_from_free_speech(transcript)
+                if inferred_product:
+                    params["product"] = inferred_product
+            if "quantity" not in params:
+                inferred_qty = self._infer_quantity_from_free_speech(transcript)
+                if inferred_qty:
+                    params["quantity"] = inferred_qty
+
+            logger.info("Intent inferred by fallback.", intent="create_order", params=list(params.keys()))
+            return ParsedIntent(intent="create_order", params=params, confidence=0.7)
 
         logger.warning("No intent matched.", transcript=transcript[:80])
         return ParsedIntent(intent="unknown", params={}, confidence=0.0)
@@ -191,6 +241,56 @@ class IntentService:
             if match:
                 extracted[param_name] = match.group(1).strip()
         return extracted
+
+    @staticmethod
+    def _looks_like_order_request(text_lower: str) -> bool:
+        has_verb = any(verb in text_lower for verb in _ORDER_VERBS)
+        has_qty = re.search(rf"\b({_QTY_TOKEN})\b", text_lower) is not None
+        return has_verb and has_qty
+
+    @staticmethod
+    def _extract_order_items(text: str) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        parts = re.split(r"\b(?:và|va|với|voi)\b", text, flags=re.IGNORECASE)
+        item_pattern = re.compile(
+            rf"(?:cho\s+\w+\s+|lấy\s+|them\s+|thêm\s+|gọi\s+|goi\s+|order\s+)?({_QTY_TOKEN})\s+([A-Za-z0-9À-ỹ\s]+)",
+            re.IGNORECASE,
+        )
+
+        for part in parts:
+            match = item_pattern.search(part)
+            if not match:
+                continue
+            quantity = match.group(1).strip()
+            product = " ".join(match.group(2).split())
+            product = re.sub(r"[\.,;:!?]+$", "", product).strip()
+            if not product:
+                continue
+            items.append({"product": product, "quantity": quantity})
+        return items
+
+    @staticmethod
+    def _infer_product_from_free_speech(text: str) -> str | None:
+        match = re.search(
+            rf"(?:cho\s+\w+\s+|lấy\s+|thêm\s+|gọi\s+)?(?:{_QTY_TOKEN})\s+([A-Za-z0-9À-ỹ\s]+?)(?:\s+và\s+(?:{_QTY_TOKEN})|[\.,;]|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        product = " ".join(match.group(1).split())
+        return product or None
+
+    @staticmethod
+    def _infer_quantity_from_free_speech(text: str) -> str | None:
+        match = re.search(
+            rf"(?:cho\s+\w+\s+|lấy\s+|thêm\s+|gọi\s+)?({_QTY_TOKEN})\s+[A-Za-z0-9À-ỹ]+",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group(1).strip()
 
 
 # Module-level singleton
